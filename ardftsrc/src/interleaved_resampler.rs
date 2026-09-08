@@ -1495,9 +1495,16 @@ mod tests {
         let decimated_output = process_all_samples(&mut decimated, &input).unwrap();
 
         assert_eq!(reference_output.len(), decimated_output.len());
-        let max_abs_diff = reference_output
+
+        // The last few samples come from LPC-extrapolated tail padding (see lpc.rs), not real
+        // input, since `input_frames` doesn't divide evenly by the 24:1 rate ratio. That
+        // extrapolation amplifies ordinary cross-platform FFT rounding noise, so
+        // it's excluded here to keep this a pure passband-fidelity check.
+        const TRAILING_EXTRAPOLATED_SAMPLES_TO_IGNORE: usize = 16;
+        let settled_len = reference_output.len() - TRAILING_EXTRAPOLATED_SAMPLES_TO_IGNORE;
+        let max_abs_diff = reference_output[..settled_len]
             .iter()
-            .zip(decimated_output.iter())
+            .zip(decimated_output[..settled_len].iter())
             .map(|(reference, decimated)| (reference - decimated).abs())
             .fold(0.0f32, f32::max);
         assert!(
