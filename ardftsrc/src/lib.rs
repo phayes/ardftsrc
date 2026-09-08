@@ -12,6 +12,10 @@ mod planar_vecs;
 mod realtime;
 mod taper;
 
+// feature: extended-precision-fft
+#[cfg(feature = "extended-precision-fft")]
+mod dd_fft;
+
 pub use config::{Config, PRESET_EXTREME, PRESET_FAST, PRESET_GOOD, PRESET_HIGH};
 pub use error::Error;
 pub use interleaved_resampler::InterleavedResampler;
