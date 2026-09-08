@@ -43,7 +43,6 @@ pub const PRESET_FAST: Config = Config {
     quality: 512,
     bandwidth: 0.8323,
     taper_type: TaperType::Cosine(3.4375),
-    decimate: true,
     ..Config::DEFAULT
 };
 
