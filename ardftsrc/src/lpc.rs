@@ -14,6 +14,10 @@ pub(crate) const EXTRAPOLATION_MAX_ORDER: usize = 64;
 /// diverged and every later value is garbage on its way to overflow.
 pub(crate) const EXTRAPOLATION_DIVERGENCE_HEADROOM: f64 = 8.0;
 
+/// Length, in samples, of the linear fade-out applied once divergence is
+/// detected.
+pub(crate) const EXTRAPOLATION_DIVERGENCE_FADE_SAMPLES: usize = 32;
+
 /// Per-coefficient damping multiplier for LPC stabilization.
 pub(crate) const LPC_DAMPING_FACTOR: f64 = 0.999;
 
@@ -179,8 +183,9 @@ where
 /// magnitudes overflow downstream DFT convolution into whole NaN blocks. Once
 /// any prediction exceeds the seed's own peak by
 /// [`EXTRAPOLATION_DIVERGENCE_HEADROOM`], the predictor has diverged and every
-/// later value is garbage, so the remainder of the prediction is filled with
-/// silence instead.
+/// later value (including this one) is garbage. When divergence is detected, fade
+/// [`EXTRAPOLATION_DIVERGENCE_FADE_SAMPLES`] already-accepted samples
+/// down to zero.
 pub(crate) fn extrapolate_forward<T>(input: &[T], extra: usize, fallback: ExtrapolateFallback) -> Vec<T>
 where
     T: Float,
@@ -211,7 +216,15 @@ where
         }
         let next = if next.is_finite() { next } else { T::zero() };
         if next.abs() > divergence_bound {
-            // Diverged: the rest of the prediction would only grow further.
+            // Diverged: this sample and everything after it is garbage and becomes
+            // silence. Retroactively ramp the already-accepted tail down to zero too,
+            // so the transition into silence is a fade instead of a hard cut.
+            let fade_len = EXTRAPOLATION_DIVERGENCE_FADE_SAMPLES.min(output.len());
+            let fade_start = output.len() - fade_len;
+            for (step, sample) in output[fade_start..].iter_mut().enumerate() {
+                let t = T::from(step + 1).unwrap_or(T::one()) / T::from(fade_len).unwrap_or(T::one());
+                *sample = *sample * (T::one() - t);
+            }
             output.resize(extra, T::zero());
             return output;
         }
@@ -369,6 +382,43 @@ mod tests {
         assert!(
             max_predicted <= seed_peak * EXTRAPOLATION_DIVERGENCE_HEADROOM,
             "diverged prediction reached {max_predicted:e} from a seed peak of {seed_peak:e}"
+        );
+    }
+
+    #[test]
+    fn test_extrapolate_forward_divergence_fades_instead_of_cutting() {
+        // Cutting straight from a near-bound value to zero is itself an audible
+        // discontinuity. The already-accepted samples leading up to the point of
+        // divergence must be faded down so the transition into silence is gradual
+        // rather than a jump from a near-bound value straight to zero. (The seed
+        // keeps growing throughout the fade window too, so the faded samples are
+        // not strictly monotonic decreasing in isolation -- only the fade factor
+        // applied to them is.)
+        let seed: Vec<f64> = (0..512).map(|i| 1e-9 * 1.05f64.powi(i)).collect();
+        let seed_peak = seed.iter().fold(0.0f64, |a, s| a.max(s.abs()));
+        let divergence_bound = seed_peak * EXTRAPOLATION_DIVERGENCE_HEADROOM;
+        let predicted = extrapolate_forward(&seed, 2_000_000, ExtrapolateFallback::Hold);
+
+        let silence_start = predicted
+            .iter()
+            .position(|v| *v == 0.0)
+            .expect("prediction should diverge to silence within 2,000,000 samples");
+        assert!(silence_start >= EXTRAPOLATION_DIVERGENCE_FADE_SAMPLES);
+        // The last fade sample lands exactly on the first silent sample.
+        let fade_end = silence_start + 1;
+        let fade_start = fade_end - EXTRAPOLATION_DIVERGENCE_FADE_SAMPLES;
+        let fade = &predicted[fade_start..fade_end];
+
+        assert_eq!(*fade.last().unwrap(), 0.0, "fade must land exactly on silence");
+        let just_before_silence = fade[fade.len() - 2].abs();
+        assert!(
+            just_before_silence < divergence_bound * 0.25,
+            "sample right before silence should already be faded down, not near the \
+             divergence bound (bound={divergence_bound}, got={just_before_silence})"
+        );
+        assert!(
+            predicted[fade_end..].iter().all(|v| *v == 0.0),
+            "everything after the fade must be silence"
         );
     }
 }
