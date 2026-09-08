@@ -220,7 +220,7 @@ pub struct Config {
     /// Enables an optional 2:1 pre-decimation stage ahead of the FFT resampler for very large
     /// downsampling ratios (e.g. 192kHz -> 48kHz).
     ///
-    /// When enabled, [`derive_config()`](Config::derive_config) may insert one or more cheap
+    /// When enabled, it inserts one or more cheap
     /// time-domain 2:1 decimation stages before the FFT resampler, chosen so the FFT stage still
     /// performs at least a genuine 2:1 reduction of its own. Each decimation stage halves the
     /// working sample rate, which shrinks the FFT chunk/window size (and therefore streaming
@@ -398,7 +398,19 @@ impl Config {
     }
 
     /// Enables an optional 2:1 pre-decimation stage ahead of the FFT resampler for very large
-    /// downsampling ratios. See [`Config::decimate`] for details.
+    /// downsampling ratios (e.g. 192kHz -> 48kHz).
+    ///
+    /// When enabled, it inserts one or more cheap
+    /// time-domain 2:1 decimation stages before the FFT resampler, chosen so the FFT stage still
+    /// performs at least a genuine 2:1 reduction of its own. Each decimation stage halves the
+    /// working sample rate, which shrinks the FFT chunk/window size (and therefore streaming
+    /// buffer requirements and algorithmic latency) roughly in proportion.
+    ///
+    /// Each decimation stage reuses [`bandwidth`](Config::bandwidth) to decide how much guard
+    /// band to keep below its own post-decimation Nyquist frequency, so it makes the same
+    /// quality tradeoff already implied by that setting. 
+    /// Decimation only ever engages when downsampling by at least 4x.
+    /// For smaller ratios it has no effect.
     #[must_use]
     pub fn with_decimate(mut self, decimate: bool) -> Self {
         self.decimate = decimate;

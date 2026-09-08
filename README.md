@@ -217,6 +217,16 @@ let config = ardftsrc::PRESET_GOOD
 
 † You should probably use [`PRESET_GOOD`](https://docs.rs/ardftsrc/latest/ardftsrc/constant.PRESET_GOOD.html). It's fast,  has very high quality metrics, and has lower pre-ringing artefact as compared PRESET_HIGH and PRESET_EXTREME.
 
+## Extreme Downsampling Ratios
+
+If you need to support very large downsampling ratios (e.g. 192kHz → 8kHz), set [`.with_decimate(true)`](https://docs.rs/ardftsrc/latest/ardftsrc/struct.Config.html#method.with_decimate) to speed things up. It enables a conservative pre-decimator (only at ratios of 4:1 or higher) that applies progressive 2:1 decimations before the main resampling stage. It is designed so the FFT stage still performs at least a genuine 2:1 reduction of its own, and respects the configured bandwidth.
+
+```rust
+let config = ardftsrc::Config::new(192_000, 8_000, 1).with_decimate(true);
+```
+
+It's a speed/memory optimization, not a way to reduce buffering or latency — for that, lower `quality` instead. If you do lower `quality` for a large ratio, turn `decimate` on too: it keeps a low-`quality` conversion sounding good at ratios where it would otherwise struggle.
+
 ## Feature Flags
 
 | Flag           | Enables                                                                           | Default |
