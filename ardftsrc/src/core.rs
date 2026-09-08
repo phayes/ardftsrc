@@ -6,6 +6,7 @@ use realfft::{ComplexToReal, FftNum, RealFftPlanner, RealToComplex};
 
 use crate::Error;
 use crate::config::DerivedConfig;
+use crate::decimate::DecimationChain;
 use crate::lpc::{ExtrapolateFallback, extrapolate_backward, extrapolate_forward};
 
 pub(crate) struct ArdftsrcCore<T = f64>
@@ -42,6 +43,17 @@ where
     input_sample_count: usize,
     /// Total number of output samples for the current stream.
     output_sample_count: usize,
+    /// Optional cascade of 2:1 pre-decimation stages run ahead of the FFT pipeline. Empty
+    /// (zero-cost passthrough) unless [`Config::decimate`](crate::Config::decimate) is enabled
+    /// and the rate ratio warrants it.
+    decimation: DecimationChain<T>,
+    /// The decimation cascade's own group delay, converted to output-domain samples. Added on
+    /// top of `output_offset` when trimming startup silence, mirroring how `output_offset`
+    /// compensates for the FFT stage's own algorithmic delay. Constant for the life of this
+    /// instance (derived purely from config), so it's cached here rather than recomputed.
+    decimator_output_delay: usize,
+    /// Reused scratch buffer for the decimated chunk, to avoid reallocating every call.
+    decimation_scratch: Vec<T>,
 }
 
 /// Reusable FFT working buffers for one transform pass.
@@ -103,6 +115,16 @@ where
         let overlap = vec![T::zero(); derived.output_chunk_frames];
         let output_block = vec![T::zero(); derived.output_chunk_frames];
         let prev_input_window = vec![T::zero(); derived.input_chunk_frames * 2];
+        let decimation = DecimationChain::new(derived.decimation_stages, &derived.decimation_taps);
+        // Converts the decimation cascade's raw-domain group delay into an equivalent number of
+        // output-domain samples, using the true (pre-decimation) input rate -- this is the same
+        // rate ratio the whole stream is nominally converting at, so a delay at the front of the
+        // pipeline shows up scaled by that ratio at the output.
+        let decimator_output_delay = if derived.decimation_stages > 0 {
+            (decimation.raw_group_delay() * derived.output_sample_rate).div_ceil(derived.input_sample_rate)
+        } else {
+            0
+        };
 
         Self {
             derived,
@@ -114,12 +136,15 @@ where
             prev_input_window,
             final_input_seen: false,
             finalized: false,
-            trim_remaining: output_offset,
+            trim_remaining: output_offset + decimator_output_delay,
             flush_remaining: output_offset,
             pre: None,
             post: None,
             input_sample_count: 0,
             output_sample_count: 0,
+            decimation,
+            decimator_output_delay,
+            decimation_scratch: Vec::new(),
         }
     }
 
@@ -134,10 +159,11 @@ where
         self.output_sample_count
     }
 
-    /// Returns the required non-final streaming chunk length in samples.
+    /// Returns the required non-final streaming chunk length in samples, in the raw
+    /// (pre-decimation) domain that callers of [`process_chunk()`](Self::process_chunk) work in.
     #[inline]
     pub(crate) fn input_chunk_samples(&self) -> usize {
-        self.input_chunk_len_samples()
+        self.derived.raw_input_chunk_frames()
     }
 
     /// Returns the required `input` length for each [`process_chunk()`](Self::process_chunk) call.
@@ -162,6 +188,7 @@ where
     /// extrapolation.
     #[inline]
     pub fn pre(&mut self, pre: Vec<T>) {
+        let pre = self.decimate_context(&pre);
         self.pre = self.normalize_context(pre);
     }
 
@@ -182,7 +209,26 @@ where
     /// extrapolation.
     #[inline]
     pub fn post(&mut self, post: Vec<T>) {
+        let post = self.decimate_context(&post);
         self.post = self.normalize_context(post);
+    }
+
+    /// Runs raw-domain edge context through a fresh (zero-state) decimation chain, matching what
+    /// the streaming path does to real input. Uses a scratch chain rather than `self.decimation`
+    /// so setting `pre`/`post` never perturbs the live streaming filter state.
+    fn decimate_context(&self, raw: &[T]) -> Vec<T> {
+        if self.decimation.num_stages() == 0 {
+            return raw.to_vec();
+        }
+        let mut chain = DecimationChain::new(self.decimation.num_stages(), &self.derived.decimation_taps);
+        let mut out = Vec::new();
+        chain.process(raw, &mut out);
+        // Context is a one-shot static buffer (not a continuing stream), so flush immediately to
+        // recover the trailing samples that would otherwise be left stuck in the delay lines.
+        let mut flushed = Vec::new();
+        chain.flush(&mut flushed);
+        out.extend_from_slice(&flushed);
+        out
     }
 
     /// Output samples for a complete input length.
@@ -241,12 +287,14 @@ where
         self.prev_input_window.fill(T::zero());
         self.final_input_seen = false;
         self.finalized = false;
-        self.trim_remaining = self.derived.output_offset;
+        self.trim_remaining = self.derived.output_offset + self.decimator_output_delay;
         self.flush_remaining = self.derived.output_offset;
         self.input_sample_count = 0;
         self.output_sample_count = 0;
         self.pre = None;
         self.post = None;
+        self.decimation.reset();
+        self.decimation_scratch.clear();
     }
 
     /// Emits delayed tail samples, then marks stream as finalized.
@@ -346,14 +394,14 @@ where
             self.reset();
         }
 
-        let input_samples = input.len();
-
         if self.final_input_seen {
             return Err(Error::AlreadyFinalized);
         }
 
-        // Shortcut for passthrough mode.
+        // Shortcut for passthrough mode. Decimation never engages in passthrough mode (it only
+        // ever activates for a real downsampling ratio), so `input` is untouched raw data here.
         if self.is_passthrough() {
+            let input_samples = input.len();
             if is_final {
                 self.final_input_seen = true;
             }
@@ -363,10 +411,58 @@ where
             return Ok(&input[..written_samples]);
         }
 
+        let (start, len) = if self.decimation.num_stages() == 0 {
+            self.process_fft_chunk(input, input.len(), is_final)?
+        } else {
+            let raw_len = input.len();
+            let mut decimated = std::mem::take(&mut self.decimation_scratch);
+            self.decimation.process(input, &mut decimated);
+
+            if is_final {
+                // Flush the cascade's remaining delay-line state: real trailing samples are
+                // still "in flight" inside the FIR filters at this point and would otherwise be
+                // silently dropped rather than reaching the FFT stage at all.
+                let mut flushed = Vec::new();
+                self.decimation.flush(&mut flushed);
+                decimated.extend_from_slice(&flushed);
+
+                // The FFT stage's short-final-chunk path assumes strictly less than one full
+                // (decimated-domain) chunk of input; keep that invariant here rather than
+                // growing window/scratch buffers to accommodate a rare worst case. Each stage's
+                // tap count is already capped (see `design_decimation_taps`) so the flush is
+                // effectively lossless in the common case -- this only truncates in extreme
+                // configurations where the cascade's delay exceeds a full chunk.
+                let chunk_frames = self.derived.input_chunk_frames;
+                if decimated.len() >= chunk_frames {
+                    decimated.truncate(chunk_frames.saturating_sub(1));
+                }
+            }
+
+            let outcome = self.process_fft_chunk(&decimated, raw_len, is_final);
+            self.decimation_scratch = decimated;
+            outcome?
+        };
+
+        Ok(&self.output_block[start..start + len])
+    }
+
+    /// Runs one chunk through the FFT-domain pipeline for an already-decimated (or, when
+    /// decimation is disabled, raw) `input` buffer.
+    ///
+    /// `raw_input_len` is the number of *raw* (pre-decimation) samples this chunk represents,
+    /// used for `input_sample_count`/output-budget bookkeeping, which is always expressed in the
+    /// raw domain that callers of [`process_chunk()`](Self::process_chunk) work in. `input.len()`
+    /// itself (the decimated-domain count) drives the FFT windowing logic below.
+    ///
+    /// Returns `(start, len)` indexing into `self.output_block`.
+    fn process_fft_chunk(&mut self, input: &[T], raw_input_len: usize, is_final: bool) -> Result<(usize, usize), Error> {
+        let input_samples = input.len();
+
         if is_final {
             self.final_input_seen = true;
             if input_samples == 0 {
-                return Ok(&input);
+                self.input_sample_count += raw_input_len;
+                return Ok((0, 0));
             }
         }
 
@@ -389,17 +485,16 @@ where
             self.save_current_window();
         }
 
-        self.input_sample_count += input_samples;
+        self.input_sample_count += raw_input_len;
 
         let skip_samples = self.trim_remaining.min(self.output_chunk_len_samples());
         self.trim_remaining -= skip_samples;
         let chunk_samples_after_trim = self.output_chunk_len_samples() - skip_samples;
-        let candidate_samples = chunk_samples_after_trim;
-        let written_samples = self.cap_write_to_output_budget(candidate_samples);
+        let written_samples = self.cap_write_to_output_budget(chunk_samples_after_trim);
         let src_start = skip_samples;
         self.output_sample_count += written_samples;
 
-        return Ok(&self.output_block[src_start..src_start + written_samples]);
+        Ok((src_start, written_samples))
     }
 
     /// Returns true when rates match and no FFT-domain processing has been requested.

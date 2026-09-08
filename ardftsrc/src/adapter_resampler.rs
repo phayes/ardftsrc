@@ -37,7 +37,7 @@ where
             .map(|_| ArdftsrcCore::new(derived.clone()))
             .collect();
 
-        let input_staging = vec![vec![T::zero(); derived.input_chunk_frames]; config.channels];
+        let input_staging = vec![vec![T::zero(); derived.raw_input_chunk_frames()]; config.channels];
         let output_staging = vec![vec![T::zero(); derived.output_chunk_frames]; config.channels];
 
         Ok(Self {
@@ -73,7 +73,7 @@ where
     #[must_use]
     #[inline]
     pub fn input_chunk_size(&self) -> usize {
-        self.derived.input_chunk_frames * self.config.channels
+        self.derived.raw_input_chunk_frames() * self.config.channels
     }
 
     /// Returns the recommended per-call `output` capacity in interleaved samples.
@@ -178,9 +178,10 @@ where
         self.ensure_input_buffer_shape(input, false)?;
 
         // Deinterleave the input into the input_staging
+        let raw_chunk_frames = self.derived.raw_input_chunk_frames();
         for channel in &mut self.input_staging {
-            if channel.len() != self.derived.input_chunk_frames {
-                channel.resize(self.derived.input_chunk_frames, T::zero());
+            if channel.len() != raw_chunk_frames {
+                channel.resize(raw_chunk_frames, T::zero());
             }
         }
         for channel_idx in 0..self.config.channels {
@@ -310,11 +311,10 @@ where
             });
         }
 
-        if (!is_final && input.frames() != self.derived.input_chunk_frames)
-            || (is_final && input.frames() > self.derived.input_chunk_frames)
-        {
+        let expected_frames = self.derived.raw_input_chunk_frames();
+        if (!is_final && input.frames() != expected_frames) || (is_final && input.frames() > expected_frames) {
             return Err(Error::WrongFrameCount {
-                expected: self.derived.input_chunk_frames,
+                expected: expected_frames,
                 actual: input.frames(),
             });
         }

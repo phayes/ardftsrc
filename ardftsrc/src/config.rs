@@ -43,6 +43,7 @@ pub const PRESET_FAST: Config = Config {
     quality: 512,
     bandwidth: 0.8323,
     taper_type: TaperType::Cosine(3.4375),
+    decimate: true,
     ..Config::DEFAULT
 };
 
@@ -216,6 +217,24 @@ pub struct Config {
     /// `0.0` disables phase rotation. The default value is `50.0`.
     pub phase_intensity: f32,
 
+    /// Enables an optional 2:1 pre-decimation stage ahead of the FFT resampler for very large
+    /// downsampling ratios (e.g. 192kHz -> 48kHz).
+    ///
+    /// When enabled, [`derive_config()`](Config::derive_config) may insert one or more cheap
+    /// time-domain 2:1 decimation stages before the FFT resampler, chosen so the FFT stage still
+    /// performs at least a genuine 2:1 reduction of its own. Each decimation stage halves the
+    /// working sample rate, which shrinks the FFT chunk/window size (and therefore streaming
+    /// buffer requirements and algorithmic latency) roughly in proportion.
+    ///
+    /// Each decimation stage reuses [`bandwidth`](Config::bandwidth) to decide how much guard
+    /// band to keep below its own post-decimation Nyquist frequency, so it makes the same
+    /// quality tradeoff already implied by that setting. 
+    /// Decimation only ever engages when downsampling by at least 4x.
+    /// For smaller ratios it has no effect.
+    ///
+    /// Default value is `false`.
+    pub decimate: bool,
+
     /// For [`RodioResampler`](crate::RodioResampler), this setting controls whether to use a fast start mode.
     ///
     /// Fast start mode will prime the resampler with initial samples to get it up to speed, and avoid start-up silence.
@@ -244,6 +263,7 @@ impl Config {
         phase_intensity: 50.0,
         #[cfg(feature = "rodio")]
         rodio_fast_start: false,
+        decimate: false,
     };
 
     /// Builds a config with explicit sample rates/channel count and default (PRESET_GOOD) quality settings.
@@ -377,6 +397,14 @@ impl Config {
         self
     }
 
+    /// Enables an optional 2:1 pre-decimation stage ahead of the FFT resampler for very large
+    /// downsampling ratios. See [`Config::decimate`] for details.
+    #[must_use]
+    pub fn with_decimate(mut self, decimate: bool) -> Self {
+        self.decimate = decimate;
+        self
+    }
+
     /// Validates all user-facing configuration fields.
     ///
     /// Returns `Ok(())` when all values are in range, or a specific `Error` describing the first
@@ -461,6 +489,21 @@ pub struct DerivedConfig<T> {
     pub(crate) taper: Vec<T>,
     pub(crate) phase: Vec<Complex<T>>,
     pub(crate) phase_enabled: bool,
+    /// Number of cascaded 2:1 decimation stages to run ahead of the FFT resampler. Zero when
+    /// [`Config::decimate`] is disabled or the rate ratio doesn't warrant it.
+    pub(crate) decimation_stages: usize,
+    /// FIR coefficients shared by every decimation stage (empty when `decimation_stages == 0`).
+    pub(crate) decimation_taps: Vec<T>,
+}
+
+impl<T> DerivedConfig<T> {
+    /// Returns the raw (pre-decimation) input chunk length in frames -- the number of frames a
+    /// caller must supply per streaming chunk. Equals `input_chunk_frames` when decimation is
+    /// disabled.
+    #[inline]
+    pub(crate) fn raw_input_chunk_frames(&self) -> usize {
+        self.input_chunk_frames << self.decimation_stages
+    }
 }
 
 impl<T> DerivedConfig<T>
@@ -471,8 +514,18 @@ where
     ///
     /// Returns a fully populated [`DerivedConfig`] with rate-reduced chunk sizes and offsets.
     fn from_config(config: &Config) -> Self {
-        let common_divisor = gcd(config.input_sample_rate, config.output_sample_rate);
-        let mut input_chunk_frames = config.input_sample_rate / common_divisor;
+        let decimation_stages = if config.decimate {
+            crate::decimate::decimation_stage_count(config.input_sample_rate, config.output_sample_rate)
+        } else {
+            0
+        };
+        // FFT geometry is derived from the *decimated* working rate; `input_sample_rate` below
+        // keeps reporting the true (raw, pre-decimation) rate, since that's the domain callers
+        // and `is_passthrough()` operate in.
+        let effective_input_rate = config.input_sample_rate >> decimation_stages;
+
+        let common_divisor = gcd(effective_input_rate, config.output_sample_rate);
+        let mut input_chunk_frames = effective_input_rate / common_divisor;
         let mut output_chunk_frames = config.output_sample_rate / common_divisor;
 
         let denominator = input_chunk_frames.min(output_chunk_frames);
@@ -489,7 +542,7 @@ where
         let output_offset = (output_fft_size - output_chunk_frames) / 2;
         let cutoff_bins = input_chunk_frames.min(output_chunk_frames) + 1;
         let taper_bins = (cutoff_bins as f64 * (1.0 - f64::from(config.bandwidth))).ceil() as usize;
-        let is_passthrough = config.input_sample_rate == config.output_sample_rate;
+        let is_passthrough = effective_input_rate == config.output_sample_rate;
         let taper = config
             .taper_type
             .build_taper(input_fft_size, cutoff_bins, taper_bins, is_passthrough);
@@ -498,6 +551,15 @@ where
         let phase_intensity = T::from(config.phase_intensity).unwrap_or_else(T::zero);
         let phase = Self::build_phase(cutoff_bins, phase_value, phase_intensity);
         let phase_enabled = !phase_value.is_zero() && !phase_intensity.is_zero();
+
+        let decimation_taps = if decimation_stages > 0 {
+            // Cap each stage's group delay to roughly the (decimated-domain) chunk size, so
+            // flushing the cascade's trailing state at end-of-stream stays effectively lossless
+            // (see `decimate::design_decimation_taps` and `ArdftsrcCore`'s finalize handling).
+            crate::decimate::design_decimation_taps(config.bandwidth, input_chunk_frames)
+        } else {
+            Vec::new()
+        };
 
         Self {
             input_sample_rate: config.input_sample_rate,
@@ -513,6 +575,8 @@ where
             taper,
             phase,
             phase_enabled,
+            decimation_stages,
+            decimation_taps,
         }
     }
 

@@ -1308,4 +1308,43 @@ mod tests {
         assert!(!stream.is_done());
         assert!(stream.samples_left_in_span().is_known());
     }
+
+    #[test]
+    fn decimate_does_not_change_priming_or_buffer_requirements() {
+        // Priming samples/duration are derived from the raw (caller-facing) input chunk size,
+        // which is fundamentally `quality * (input_rate / output_rate)` -- the number of
+        // *seconds* of context needed for the configured frequency resolution. Pre-decimating
+        // the input doesn't change that duration, so enabling decimation should leave
+        // RealtimeResampler's buffering/priming requirements unchanged. Decimation's real
+        // benefit is that the internal FFT transform itself shrinks (see
+        // `InterleavedResampler`'s `decimate_shrinks_internal_fft_size_but_not_raw_buffer_size`
+        // test), which is invisible at this level.
+        let config = Config {
+            input_sample_rate: 192_000,
+            output_sample_rate: 8_000,
+            channels: 1,
+            quality: 64,
+            bandwidth: 0.95,
+            ..Config::default()
+        };
+        let without_decimation = RealtimeResampler::<f32>::new(Config {
+            decimate: false,
+            ..config.clone()
+        })
+        .unwrap();
+        let with_decimation = RealtimeResampler::<f32>::new(Config {
+            decimate: true,
+            ..config
+        })
+        .unwrap();
+
+        assert_eq!(
+            with_decimation.estimate_priming_samples(),
+            without_decimation.estimate_priming_samples()
+        );
+        assert_eq!(
+            with_decimation.estimate_priming_duration(),
+            without_decimation.estimate_priming_duration()
+        );
+    }
 }

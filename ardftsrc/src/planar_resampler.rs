@@ -72,7 +72,7 @@ where
     #[must_use]
     #[inline]
     pub fn input_buffer_size(&self) -> usize {
-        self.derived.input_chunk_frames * self.config.channels
+        self.derived.raw_input_chunk_frames() * self.config.channels
     }
 
     /// Returns the recommended total per-call `output` capacity.
@@ -279,22 +279,17 @@ where
             });
         }
 
+        let expected_frames = self.derived.raw_input_chunk_frames();
         if !is_final {
-            if let Some(channel) = input
-                .iter()
-                .find(|channel| channel.len() != self.derived.input_chunk_frames)
-            {
+            if let Some(channel) = input.iter().find(|channel| channel.len() != expected_frames) {
                 return Err(Error::WrongFrameCount {
-                    expected: self.derived.input_chunk_frames,
+                    expected: expected_frames,
                     actual: channel.len(),
                 });
             }
-        } else if let Some(channel) = input
-            .iter()
-            .find(|channel| channel.len() > self.derived.input_chunk_frames)
-        {
+        } else if let Some(channel) = input.iter().find(|channel| channel.len() > expected_frames) {
             return Err(Error::WrongFrameCount {
-                expected: self.derived.input_chunk_frames,
+                expected: expected_frames,
                 actual: channel.len(),
             });
         }
@@ -356,10 +351,11 @@ where
             });
         }
 
+        let max_samples = self.derived.raw_input_chunk_frames();
         for (core, samples) in self.cores.iter_mut().zip(pre.into_iter()) {
             let mut samples = samples;
-            if samples.len() > self.derived.input_chunk_frames {
-                samples = samples.split_off(samples.len() - self.derived.input_chunk_frames);
+            if samples.len() > max_samples {
+                samples = samples.split_off(samples.len() - max_samples);
             }
             core.pre(samples);
         }
@@ -395,10 +391,11 @@ where
             });
         }
 
+        let max_samples = self.derived.raw_input_chunk_frames();
         for (core, samples) in self.cores.iter_mut().zip(post.into_iter()) {
             let mut samples = samples;
-            if samples.len() > self.derived.input_chunk_frames {
-                samples.truncate(self.derived.input_chunk_frames);
+            if samples.len() > max_samples {
+                samples.truncate(max_samples);
             }
             core.post(samples);
         }

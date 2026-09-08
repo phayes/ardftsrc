@@ -50,7 +50,7 @@ where
             .map(|_| ArdftsrcCore::new(derived.clone()))
             .collect();
 
-        let input_staging = vec![vec![T::zero(); derived.input_chunk_frames]; config.channels];
+        let input_staging = vec![vec![T::zero(); derived.raw_input_chunk_frames()]; config.channels];
         let output_staging = vec![vec![T::zero(); derived.output_chunk_frames]; config.channels];
 
         Ok(Self {
@@ -86,7 +86,7 @@ where
     #[must_use]
     #[inline]
     pub fn input_buffer_size(&self) -> usize {
-        self.derived.input_chunk_frames * self.config.channels
+        self.derived.raw_input_chunk_frames() * self.config.channels
     }
 
     /// Returns the recommended per-call `output` capacity in interleaved samples.
@@ -298,11 +298,10 @@ where
         }
 
         let frames = input.len() / self.config.channels;
-        if (!is_final && frames != self.derived.input_chunk_frames)
-            || (is_final && frames > self.derived.input_chunk_frames)
-        {
+        let expected_frames = self.derived.raw_input_chunk_frames();
+        if (!is_final && frames != expected_frames) || (is_final && frames > expected_frames) {
             return Err(Error::WrongFrameCount {
-                expected: self.derived.input_chunk_frames,
+                expected: expected_frames,
                 actual: frames,
             });
         }
@@ -1399,5 +1398,111 @@ mod tests {
             finalize_samples_chunk(&mut resampler, &mut output),
             Err(Error::AlreadyFinalized)
         ));
+    }
+
+    #[test]
+    fn decimate_shrinks_internal_fft_size_but_not_raw_buffer_size() {
+        // 192kHz -> 8kHz is a 24:1 ratio, well past the 4:1 threshold where decimation engages.
+        //
+        // The raw (caller-facing) chunk size is fundamentally `quality * (input_rate /
+        // output_rate)` -- that's the number of *seconds* of context needed for the configured
+        // frequency resolution, and pre-decimating the input doesn't change that duration.
+        // Decimation's real benefit is that the FFT stage itself runs on a much smaller
+        // transform (fewer decimated-domain frames), not a smaller caller-facing buffer.
+        let without_decimation = InterleavedResampler::<f32>::new(Config {
+            decimate: false,
+            ..mono_config(192_000, 8_000)
+        })
+        .unwrap();
+        let with_decimation = InterleavedResampler::<f32>::new(Config {
+            decimate: true,
+            ..mono_config(192_000, 8_000)
+        })
+        .unwrap();
+
+        assert_eq!(
+            with_decimation.input_buffer_size(),
+            without_decimation.input_buffer_size(),
+            "raw caller-facing buffer size should be unaffected by decimation"
+        );
+        assert!(
+            with_decimation.derived.input_chunk_frames < without_decimation.derived.input_chunk_frames,
+            "internal (decimated-domain) FFT chunk size should shrink: with={}, without={}",
+            with_decimation.derived.input_chunk_frames,
+            without_decimation.derived.input_chunk_frames
+        );
+    }
+
+    #[test]
+    fn decimate_is_a_noop_below_4x_ratio() {
+        // A 2:1 ratio should never engage decimation, so buffer sizes must match exactly.
+        let without_decimation = InterleavedResampler::<f32>::new(Config {
+            decimate: false,
+            ..mono_config(88_200, 44_100)
+        })
+        .unwrap();
+        let with_decimation = InterleavedResampler::<f32>::new(Config {
+            decimate: true,
+            ..mono_config(88_200, 44_100)
+        })
+        .unwrap();
+
+        assert_eq!(with_decimation.input_buffer_size(), without_decimation.input_buffer_size());
+    }
+
+    #[test]
+    fn decimate_produces_finite_bounded_output_for_extreme_downsample() {
+        let config = Config {
+            decimate: true,
+            ..mono_config(192_000, 8_000)
+        };
+        let mut resampler = InterleavedResampler::<f32>::new(config).unwrap();
+        let input_frames = input_chunk_frames(&resampler) * 3 + 137;
+        let input: Vec<f32> = (0..input_frames)
+            .map(|frame| {
+                let t = frame as f32;
+                (t * 0.01).sin() * 0.2 + (t * 0.7).sin() * 0.2 + (t * 2.9).sin() * 0.2
+            })
+            .collect();
+
+        let output = process_all_samples(&mut resampler, &input).unwrap();
+
+        assert!(!output.is_empty());
+        assert!(output.iter().all(|sample| sample.is_finite() && sample.abs() < 1.5));
+    }
+
+    #[test]
+    fn decimate_preserves_low_frequency_content_close_to_non_decimated_reference() {
+        // A low-frequency tone, well inside the passband regardless of decimation, should come
+        // through nearly identically whether or not the pre-decimation stage is engaged.
+        let input_frames = 20_000;
+        let input: Vec<f32> = (0..input_frames)
+            .map(|frame| (frame as f32 * 0.002).sin() * 0.3)
+            .collect();
+
+        let mut reference = InterleavedResampler::<f32>::new(Config {
+            decimate: false,
+            ..mono_config(192_000, 8_000)
+        })
+        .unwrap();
+        let mut decimated = InterleavedResampler::<f32>::new(Config {
+            decimate: true,
+            ..mono_config(192_000, 8_000)
+        })
+        .unwrap();
+
+        let reference_output = process_all_samples(&mut reference, &input).unwrap();
+        let decimated_output = process_all_samples(&mut decimated, &input).unwrap();
+
+        assert_eq!(reference_output.len(), decimated_output.len());
+        let max_abs_diff = reference_output
+            .iter()
+            .zip(decimated_output.iter())
+            .map(|(reference, decimated)| (reference - decimated).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_abs_diff < 0.02,
+            "decimated output should closely match the non-decimated reference for passband content, got max_abs_diff={max_abs_diff}"
+        );
     }
 }

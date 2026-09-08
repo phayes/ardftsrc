@@ -3,6 +3,7 @@
 mod beta_reg;
 mod config;
 mod core;
+mod decimate;
 mod error;
 mod interleaved_resampler;
 mod lpc;

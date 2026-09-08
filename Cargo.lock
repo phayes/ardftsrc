@@ -100,7 +100,7 @@ dependencies = [
 
 [[package]]
 name = "ardftsrc"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "audio-core",
  "audioadapter",
@@ -124,7 +124,7 @@ dependencies = [
 
 [[package]]
 name = "ardftsrc-rs"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "ardftsrc",
  "audioadapter",
