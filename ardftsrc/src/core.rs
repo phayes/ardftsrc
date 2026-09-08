@@ -11,7 +11,7 @@ use crate::lpc::{ExtrapolateFallback, extrapolate_backward, extrapolate_forward}
 
 /// Plans the forward real FFT for one [`ArdftsrcCore`] instance.
 ///
-/// With the `extended-precision-fft` feature enabled and `T = f64`, this swaps in the
+/// With the `dd-fft` feature enabled and `T = f64`, this swaps in the
 /// double-double-precision engine from [`crate::dd_fft`] instead of `realfft`'s own
 /// `f64`-twiddle-limited planner (see that module's docs for why it exists). `T` is a
 /// compile-time generic parameter here, so "is `T` `f64`" can only be answered at runtime, via
@@ -19,7 +19,7 @@ use crate::lpc::{ExtrapolateFallback, extrapolate_backward, extrapolate_forward}
 /// check has confirmed `T` and `f64` are the same type -- no new trait or `unsafe` needed. For any
 /// other `T` (or with the feature off, including `f32`, which the double-double engine was never
 /// meant for), behavior is unchanged from stock `realfft`.
-#[cfg(feature = "extended-precision-fft")]
+#[cfg(feature = "dd-fft")]
 fn plan_forward<T: Float + FftNum>(planner: &mut RealFftPlanner<T>, len: usize) -> Arc<dyn RealToComplex<T>> {
     use std::any::{Any, TypeId};
     if TypeId::of::<T>() == TypeId::of::<f64>() {
@@ -32,13 +32,13 @@ fn plan_forward<T: Float + FftNum>(planner: &mut RealFftPlanner<T>, len: usize) 
     planner.plan_fft_forward(len)
 }
 
-#[cfg(not(feature = "extended-precision-fft"))]
+#[cfg(not(feature = "dd-fft"))]
 fn plan_forward<T: Float + FftNum>(planner: &mut RealFftPlanner<T>, len: usize) -> Arc<dyn RealToComplex<T>> {
     planner.plan_fft_forward(len)
 }
 
 /// Inverse counterpart of [`plan_forward`]; see its docs for the mechanism and rationale.
-#[cfg(feature = "extended-precision-fft")]
+#[cfg(feature = "dd-fft")]
 fn plan_inverse<T: Float + FftNum>(planner: &mut RealFftPlanner<T>, len: usize) -> Arc<dyn ComplexToReal<T>> {
     use std::any::{Any, TypeId};
     if TypeId::of::<T>() == TypeId::of::<f64>() {
@@ -51,7 +51,7 @@ fn plan_inverse<T: Float + FftNum>(planner: &mut RealFftPlanner<T>, len: usize) 
     planner.plan_fft_inverse(len)
 }
 
-#[cfg(not(feature = "extended-precision-fft"))]
+#[cfg(not(feature = "dd-fft"))]
 fn plan_inverse<T: Float + FftNum>(planner: &mut RealFftPlanner<T>, len: usize) -> Arc<dyn ComplexToReal<T>> {
     planner.plan_fft_inverse(len)
 }
@@ -95,9 +95,8 @@ where
     /// and the rate ratio warrants it.
     decimation: DecimationChain<T>,
     /// The decimation cascade's own group delay, converted to output-domain samples. Added on
-    /// top of `output_offset` when trimming startup silence, mirroring how `output_offset`
-    /// compensates for the FFT stage's own algorithmic delay. Constant for the life of this
-    /// instance (derived purely from config), so it's cached here rather than recomputed.
+    /// top of `output_offset` when trimming startup silence. Constant for the life of this
+    /// instance (derived purely from config).
     decimator_output_delay: usize,
     /// Reused scratch buffer for the decimated chunk, to avoid reallocating every call.
     decimation_scratch: Vec<T>,
@@ -820,7 +819,7 @@ mod dd_backend_wiring_tests {
     /// `f64` core processing (previously untested at this level -- existing `core`-level tests
     /// all exercise `f32`) end to end, at a size large enough to actually engage the
     /// mixed-radix/Bluestein selection in `dd_fft::vendor::rustfft::plan` when the
-    /// `extended-precision-fft` feature is on (see `plan_forward`/`plan_inverse`). Passes either
+    /// `dd-fft` feature is on (see `plan_forward`/`plan_inverse`). Passes either
     /// way the feature is set, so it also covers the plain `realfft` `f64` path when it's off.
     #[test]
     fn f64_core_resamples_a_sine_correctly() {

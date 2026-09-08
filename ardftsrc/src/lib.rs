@@ -12,8 +12,8 @@ mod planar_vecs;
 mod realtime;
 mod taper;
 
-// feature: extended-precision-fft
-#[cfg(feature = "extended-precision-fft")]
+// feature: dd-fft
+#[cfg(feature = "dd-fft")]
 mod dd_fft;
 
 pub use config::{Config, PRESET_EXTREME, PRESET_FAST, PRESET_GOOD, PRESET_HIGH};

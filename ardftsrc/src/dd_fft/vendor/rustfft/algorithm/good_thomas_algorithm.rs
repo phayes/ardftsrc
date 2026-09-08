@@ -4,7 +4,7 @@ use std::sync::Arc;
 use num_complex::Complex;
 use num_integer::Integer;
 use crate::dd_fft::vendor::strength_reduce::StrengthReducedUsize;
-use transpose;
+use crate::dd_fft::vendor::transpose;
 
 use crate::dd_fft::vendor::rustfft::array_utils;
 use crate::dd_fft::vendor::rustfft::{common::FftNum, FftDirection};

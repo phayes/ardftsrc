@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use num_complex::Complex;
 use num_traits::Zero;
-use transpose;
+use crate::dd_fft::vendor::transpose;
 
 use crate::dd_fft::vendor::rustfft::array_utils;
 use crate::dd_fft::vendor::rustfft::{common::FftNum, twiddles, FftDirection};

@@ -1,4 +1,4 @@
-//! Double-double-precision real FFT engine, gated behind the `extended-precision-fft` feature.
+//! Double-double-precision real FFT engine, gated behind the `dd-fft` feature.
 //!
 //! `ardftsrc`'s default FFT backend (`realfft`, backed by `rustfft`) computes twiddle factors in
 //! plain `f64`, which is what caps [`Config::quality`](crate::Config::quality) for `f64` output

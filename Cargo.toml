@@ -33,7 +33,6 @@ rodio = { version = "0.22", default-features = false }
 twofloat = "0.8"
 num-complex = "0.4"
 num-integer = "0.1.40"
-transpose = "0.2"
 
 [profile.release]
 opt-level = 3

@@ -20,7 +20,6 @@ pxfm = { version = "0.1.29", optional = true }
 twofloat = { workspace = true, optional = true }
 num-complex = { workspace = true, optional = true }
 num-integer = { workspace = true, optional = true }
-transpose = { workspace = true, optional = true }
 
 [dev-dependencies]
 audioadapter-buffers.workspace = true
@@ -49,16 +48,12 @@ rayon = ["dep:rayon"]
 audioadapter = ["dep:audio-core", "dep:audioadapter"]
 tracing = ["dep:tracing"]
 
-# Double-double (~106-bit) precision FFT backend for extreme `quality` settings, as an optional,
-# much slower, offline-oriented alternative to the default `realfft`-backed pipeline. See
-# `src/dd_fft/mod.rs` for how and why. `strength_reduce` and `primal-check` (small helpers the
-# vendored FFT algorithms depend on) are vendored as source under `src/dd_fft/vendor/` rather than
-# pulled in as Cargo dependencies -- see that module's docs.
-extended-precision-fft = [
+# Double-double (~106-bit) precision FFT backend for extreme quality, as an optional,
+# much slower and memory intensive, alternative to the default `realfft`-backed pipeline.
+dd-fft = [
     "dep:twofloat",
     "dep:num-complex",
     "dep:num-integer",
-    "dep:transpose",
 ]
 
  # Rodio features (examples only)

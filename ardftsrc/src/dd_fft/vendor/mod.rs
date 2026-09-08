@@ -14,14 +14,17 @@
 //!   is the one thing changed here (`rustfft::common::FftNum::twiddle`).
 //! - [`realfft`] -- the real-input/real-output FFT layer built on top of `rustfft` (MIT). Carries
 //!   the same one-function fix as `rustfft`, for the same reason.
-//! - [`primal_check`] and [`strength_reduce`] (both MIT OR Apache-2.0) -- small helper crates
-//!   `rustfft` itself depends on (Miller-Rabin primality testing for Rader's algorithm; fast
-//!   integer division for Bluestein's chirp index reduction). Vendored as source rather than
-//!   pulled in as Cargo dependencies: both are tiny, single-purpose, and low-maintenance-turnover,
-//!   so taking them as source under our own review is a smaller supply-chain footprint than
-//!   adding two more external crates to the dependency tree for this one optional feature.
+//! - [`primal_check`], [`strength_reduce`], and [`transpose`] (all MIT OR Apache-2.0) -- small
+//!   helper crates `rustfft` itself depends on (Miller-Rabin primality testing for Rader's
+//!   algorithm; fast integer division for Bluestein's chirp index reduction; cache-friendly
+//!   out-of-place matrix transposes for mixed-radix and Good–Thomas). Vendored as source rather
+//!   than pulled in as Cargo dependencies: all three are tiny, single-purpose, and
+//!   low-maintenance-turnover, so taking them as source under our own review is a smaller
+//!   supply-chain footprint than adding more external crates to the dependency tree for this one
+//!   optional feature.
 
 pub(crate) mod primal_check;
 pub(crate) mod realfft;
 pub(crate) mod rustfft;
 pub(crate) mod strength_reduce;
+pub(crate) mod transpose;
