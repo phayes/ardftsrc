@@ -1,16 +1,12 @@
 //! Double-double numeric type used internally by the [`dd_fft`](super) engine.
 //!
-//! [`twofloat::TwoFloat`] represents a value as the unevaluated sum of two non-overlapping `f64`s
-//! (~106 bits of mantissa, vs. 53 for a plain `f64`), and provides correctly-range-reduced
-//! `sin`/`cos` plus a double-double `PI`/`TAU` constant. That's exactly what's needed to compute
-//! FFT twiddle factors at much higher precision than `f64` -- see the `FftNum` doc comment in
-//! `vendor::common` for why that matters here.
-//!
 //! `TwoFloat` itself can't be used directly as the vendored engine's `T: FftNum` because it
 //! doesn't implement the `num_traits` traits (`Zero`, `One`, `Num`, `Signed`, `FromPrimitive`)
 //! that `FftNum` and `num_complex::Complex<T>` require, and orphan rules mean we can't add those
 //! impls to a foreign type from here. `Dd` is a local newtype that exists purely to carry those
 //! impls -- every method below is a thin forward onto the wrapped `TwoFloat`.
+//! 
+//! TODO: Upstream num_trait impl to twofloat crate and remove this wrapper.
 
 use std::fmt;
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Rem, RemAssign, Sub, SubAssign};

@@ -18,13 +18,14 @@ rayon = { workspace = true, optional = true }
 wavers.workspace = true
 
 [features]
-default = ["avx", "neon", "sse", "wasm_simd", "rayon"]
+default = ["avx", "neon", "sse", "wasm_simd", "rayon", "dd_fft"]
 bessel = ["ardftsrc/bessel"]
 rayon = ["dep:rayon", "ardftsrc/rayon"]
 avx = ["ardftsrc/avx"]
 neon = ["ardftsrc/neon"]
 sse = ["ardftsrc/sse"]
 wasm_simd = ["ardftsrc/wasm_simd"]
+dd_fft = ["ardftsrc/dd_fft"]
 
 [profile.release]
 opt-level = 3

@@ -216,18 +216,18 @@ pub struct Config {
     /// `0.0` disables phase rotation. The default value is `50.0`.
     pub phase_intensity: f32,
 
-    /// Enables an optional 2:1 pre-decimation stage ahead of the FFT resampler for very large
+    /// EXPERIMENTAL: Enables an optional 2:1 pre-decimation stage ahead of the FFT resampler for very large
     /// downsampling ratios (e.g. 192kHz -> 48kHz).
     ///
     /// When enabled, it inserts one or more cheap
     /// time-domain 2:1 decimation stages before the FFT resampler, chosen so the FFT stage still
-    /// performs at least a genuine 2:1 reduction of its own. Each decimation stage halves the
+    /// performs at least one genuine 2:1 reduction of its own. Each decimation stage halves the
     /// working sample rate, which shrinks the FFT chunk/window size (and therefore streaming
     /// buffer requirements and algorithmic latency) roughly in proportion.
     ///
     /// Each decimation stage reuses [`bandwidth`](Config::bandwidth) to decide how much guard
     /// band to keep below its own post-decimation Nyquist frequency, so it makes the same
-    /// quality tradeoff already implied by that setting. 
+    /// quality tradeoff already implied by that setting.
     /// Decimation only ever engages when downsampling by at least 4x.
     /// For smaller ratios it has no effect.
     ///
@@ -248,6 +248,14 @@ pub struct Config {
     /// This setting is only for [`RodioResampler`](crate::RodioResampler), it has no effect on other resamplers.
     #[cfg(feature = "rodio")]
     pub rodio_fast_start: bool,
+
+    /// Selects the double-double-precision FFT backend.
+    ///
+    /// The `dd_fft` feature makes this backend available; this setting opts an `f64` resampler
+    /// into using it. It is substantially slower and more memory intensive than the default FFT
+    /// backend, but can produce better results at extreme quality settings.
+    #[cfg(feature = "dd_fft")]
+    pub dd_fft: bool,
 }
 
 impl Config {
@@ -260,9 +268,11 @@ impl Config {
         taper_type: TaperType::Cosine(3.4375),
         phase: 0.0,
         phase_intensity: 50.0,
+        decimate: false,
         #[cfg(feature = "rodio")]
         rodio_fast_start: false,
-        decimate: false,
+        #[cfg(feature = "dd_fft")]
+        dd_fft: false,
     };
 
     /// Builds a config with explicit sample rates/channel count and default (PRESET_GOOD) quality settings.
@@ -396,23 +406,35 @@ impl Config {
         self
     }
 
-    /// Enables an optional 2:1 pre-decimation stage ahead of the FFT resampler for very large
+    /// EXPERIMENTAL: Enables an optional 2:1 pre-decimation stage ahead of the FFT resampler for very large
     /// downsampling ratios (e.g. 192kHz -> 48kHz).
     ///
     /// When enabled, it inserts one or more cheap
     /// time-domain 2:1 decimation stages before the FFT resampler, chosen so the FFT stage still
-    /// performs at least a genuine 2:1 reduction of its own. Each decimation stage halves the
+    /// performs at least one genuine 2:1 reduction of its own. Each decimation stage halves the
     /// working sample rate, which shrinks the FFT chunk/window size (and therefore streaming
     /// buffer requirements and algorithmic latency) roughly in proportion.
     ///
     /// Each decimation stage reuses [`bandwidth`](Config::bandwidth) to decide how much guard
     /// band to keep below its own post-decimation Nyquist frequency, so it makes the same
-    /// quality tradeoff already implied by that setting. 
+    /// quality tradeoff already implied by that setting.
     /// Decimation only ever engages when downsampling by at least 4x.
     /// For smaller ratios it has no effect.
     #[must_use]
     pub fn with_decimate(mut self, decimate: bool) -> Self {
         self.decimate = decimate;
+        self
+    }
+
+    /// Selects the double-double-precision FFT backend.
+    ///
+    /// This backend is substantially slower and more memory intensive than the default
+    /// `realfft` backend. It is intended for offline processing at extreme quality settings and
+    /// is only compatible with `f64` processing.
+    #[must_use]
+    #[cfg(feature = "dd_fft")]
+    pub fn with_dd_fft(mut self, dd_fft: bool) -> Self {
+        self.dd_fft = dd_fft;
         self
     }
 
@@ -470,8 +492,14 @@ impl Config {
 
         // Detect `T == f32` without specialization: only `f32` shares IEEE single max with `f32::MAX`.
         if let Some(f32_max) = num_traits::NumCast::from(f32::MAX) {
-            if <T as Float>::max_value() == f32_max && self.quality > 8192 {
-                return Err(Error::QualityTooHighForF32);
+            if <T as Float>::max_value() == f32_max {
+                #[cfg(feature = "dd_fft")]
+                if self.dd_fft {
+                    return Err(Error::DdFftIncompatibleWithF32);
+                }
+                if self.quality > 8192 {
+                    return Err(Error::QualityTooHighForF32);
+                }
             }
         }
 
@@ -505,6 +533,8 @@ pub struct DerivedConfig<T> {
     pub(crate) decimation_stages: usize,
     /// FIR coefficients shared by every decimation stage (empty when `decimation_stages == 0`).
     pub(crate) decimation_taps: Vec<T>,
+    /// Whether to use the optional double-double-precision FFT backend.
+    pub(crate) dd_fft: bool,
 }
 
 impl<T> DerivedConfig<T> {
@@ -572,6 +602,11 @@ where
             Vec::new()
         };
 
+        #[cfg(feature = "dd_fft")]
+        let dd_fft = config.dd_fft;
+        #[cfg(not(feature = "dd_fft"))]
+        let dd_fft = false;
+
         Self {
             input_sample_rate: config.input_sample_rate,
             output_sample_rate: config.output_sample_rate,
@@ -588,6 +623,7 @@ where
             phase_enabled,
             decimation_stages,
             decimation_taps,
+            dd_fft,
         }
     }
 
@@ -888,6 +924,40 @@ mod tests {
             ..Config::default()
         };
         assert!(config.derive_config::<f64>().is_ok());
+    }
+
+    #[cfg(feature = "dd_fft")]
+    #[test]
+    fn rejects_dd_fft_for_f32_derived_config() {
+        let config = Config {
+            input_sample_rate: 48_000,
+            output_sample_rate: 48_000,
+            dd_fft: true,
+            ..Config::default()
+        };
+        assert!(matches!(
+            config.derive_config::<f32>(),
+            Err(Error::DdFftIncompatibleWithF32)
+        ));
+    }
+
+    #[cfg(feature = "dd_fft")]
+    #[test]
+    fn allows_dd_fft_for_f64_derived_config() {
+        let config = Config {
+            input_sample_rate: 48_000,
+            output_sample_rate: 48_000,
+            dd_fft: true,
+            ..Config::default()
+        };
+        assert!(config.derive_config::<f64>().unwrap().dd_fft);
+    }
+
+    #[cfg(feature = "dd_fft")]
+    #[test]
+    fn leaves_dd_fft_disabled_for_default_f64_derived_config() {
+        let config = Config::new(48_000, 48_000, 2);
+        assert!(!config.derive_config::<f64>().unwrap().dd_fft);
     }
 
     #[test]

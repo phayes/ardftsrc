@@ -20,3 +20,5 @@ jobs:
       run: cargo check --verbose
     - name: Run tests
       run: cargo test --workspace --no-default-features --features "avx,neon,sse,wasm_simd,rayon,audioadapter" --verbose
+    - name: Run dd_fft tests
+      run: cargo test -p ardftsrc --no-default-features --features "dd_fft" --lib --verbose

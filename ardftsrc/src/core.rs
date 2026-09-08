@@ -9,53 +9,6 @@ use crate::config::DerivedConfig;
 use crate::decimate::DecimationChain;
 use crate::lpc::{ExtrapolateFallback, extrapolate_backward, extrapolate_forward};
 
-/// Plans the forward real FFT for one [`ArdftsrcCore`] instance.
-///
-/// With the `dd-fft` feature enabled and `T = f64`, this swaps in the
-/// double-double-precision engine from [`crate::dd_fft`] instead of `realfft`'s own
-/// `f64`-twiddle-limited planner (see that module's docs for why it exists). `T` is a
-/// compile-time generic parameter here, so "is `T` `f64`" can only be answered at runtime, via
-/// `TypeId`; the `downcast` is exactly as safe as that check, since it only ever runs once the
-/// check has confirmed `T` and `f64` are the same type -- no new trait or `unsafe` needed. For any
-/// other `T` (or with the feature off, including `f32`, which the double-double engine was never
-/// meant for), behavior is unchanged from stock `realfft`.
-#[cfg(feature = "dd-fft")]
-fn plan_forward<T: Float + FftNum>(planner: &mut RealFftPlanner<T>, len: usize) -> Arc<dyn RealToComplex<T>> {
-    use std::any::{Any, TypeId};
-    if TypeId::of::<T>() == TypeId::of::<f64>() {
-        let dd: Arc<dyn RealToComplex<f64>> = crate::dd_fft::plan_fft_forward(len);
-        let dd: Box<dyn Any> = Box::new(dd);
-        return *dd
-            .downcast::<Arc<dyn RealToComplex<T>>>()
-            .expect("TypeId check above guarantees T == f64");
-    }
-    planner.plan_fft_forward(len)
-}
-
-#[cfg(not(feature = "dd-fft"))]
-fn plan_forward<T: Float + FftNum>(planner: &mut RealFftPlanner<T>, len: usize) -> Arc<dyn RealToComplex<T>> {
-    planner.plan_fft_forward(len)
-}
-
-/// Inverse counterpart of [`plan_forward`]; see its docs for the mechanism and rationale.
-#[cfg(feature = "dd-fft")]
-fn plan_inverse<T: Float + FftNum>(planner: &mut RealFftPlanner<T>, len: usize) -> Arc<dyn ComplexToReal<T>> {
-    use std::any::{Any, TypeId};
-    if TypeId::of::<T>() == TypeId::of::<f64>() {
-        let dd: Arc<dyn ComplexToReal<f64>> = crate::dd_fft::plan_fft_inverse(len);
-        let dd: Box<dyn Any> = Box::new(dd);
-        return *dd
-            .downcast::<Arc<dyn ComplexToReal<T>>>()
-            .expect("TypeId check above guarantees T == f64");
-    }
-    planner.plan_fft_inverse(len)
-}
-
-#[cfg(not(feature = "dd-fft"))]
-fn plan_inverse<T: Float + FftNum>(planner: &mut RealFftPlanner<T>, len: usize) -> Arc<dyn ComplexToReal<T>> {
-    planner.plan_fft_inverse(len)
-}
-
 pub(crate) struct ArdftsrcCore<T = f64>
 where
     T: Float + FftNum,
@@ -149,8 +102,8 @@ where
     /// Returns a ready-to-use core instance.
     pub fn new(derived: DerivedConfig<T>) -> Self {
         let mut planner = RealFftPlanner::<T>::new();
-        let forward = plan_forward(&mut planner, derived.input_fft_size);
-        let inverse = plan_inverse(&mut planner, derived.output_fft_size);
+        let forward = plan_forward(&mut planner, derived.input_fft_size, derived.dd_fft);
+        let inverse = plan_inverse(&mut planner, derived.output_fft_size, derived.dd_fft);
         let output_offset = derived.output_offset;
         let scratch = Scratch {
             rdft_in: forward.make_input_vec(),
@@ -811,36 +764,116 @@ where
     }
 }
 
+/// Plans the forward real FFT for one [`ArdftsrcCore`] instance.
+///
+/// When the `dd_fft` feature is compiled in, `use_dd_fft` selects the double-double-precision
+/// engine for `f64`; otherwise the stock `realfft` planner is used. `T` is a compile-time generic
+/// parameter, so "is `T` `f64`" is checked with `TypeId`. The downcast is safe because it only
+/// runs after confirming that `T` and `f64` are the same type.
+/// 
+/// See [`plan_inverse`] for the inverse counterpart.
+fn plan_forward<T: Float + FftNum>(
+    planner: &mut RealFftPlanner<T>,
+    len: usize,
+    use_dd_fft: bool,
+) -> Arc<dyn RealToComplex<T>> {
+    #[cfg(feature = "dd_fft")]
+    {
+        use std::any::{Any, TypeId};
+
+        if use_dd_fft && TypeId::of::<T>() == TypeId::of::<f64>() {
+            let dd: Arc<dyn RealToComplex<f64>> = crate::dd_fft::plan_fft_forward(len);
+            let dd: Box<dyn Any> = Box::new(dd);
+            return *dd
+                .downcast::<Arc<dyn RealToComplex<T>>>()
+                .expect("TypeId check above guarantees T == f64");
+        }
+    }
+
+    #[cfg(not(feature = "dd_fft"))]
+    let _ = use_dd_fft;
+
+    planner.plan_fft_forward(len)
+}
+
+/// Inverse counterpart of [`plan_forward`]. Plans the inverse real FFT for one [`ArdftsrcCore`] instance.
+///
+/// When the `dd_fft` feature is compiled in, `use_dd_fft` selects the double-double-precision
+/// engine for `f64`; otherwise the stock `realfft` planner is used. `T` is a compile-time generic
+/// parameter, so "is `T` `f64`" is checked with `TypeId`. The downcast is safe because it only
+/// runs after confirming that `T` and `f64` are the same type.
+fn plan_inverse<T: Float + FftNum>(
+    planner: &mut RealFftPlanner<T>,
+    len: usize,
+    use_dd_fft: bool,
+) -> Arc<dyn ComplexToReal<T>> {
+    #[cfg(feature = "dd_fft")]
+    {
+        use std::any::{Any, TypeId};
+
+        if use_dd_fft && TypeId::of::<T>() == TypeId::of::<f64>() {
+            let dd: Arc<dyn ComplexToReal<f64>> = crate::dd_fft::plan_fft_inverse(len);
+            let dd: Box<dyn Any> = Box::new(dd);
+            return *dd
+                .downcast::<Arc<dyn ComplexToReal<T>>>()
+                .expect("TypeId check above guarantees T == f64");
+        }
+    }
+
+    #[cfg(not(feature = "dd_fft"))]
+    let _ = use_dd_fft;
+
+    planner.plan_fft_inverse(len)
+}
+
+
 #[cfg(test)]
 mod dd_backend_wiring_tests {
     use super::*;
     use crate::Config;
 
-    /// `f64` core processing (previously untested at this level -- existing `core`-level tests
-    /// all exercise `f32`) end to end, at a size large enough to actually engage the
-    /// mixed-radix/Bluestein selection in `dd_fft::vendor::rustfft::plan` when the
-    /// `dd-fft` feature is on (see `plan_forward`/`plan_inverse`). Passes either
-    /// way the feature is set, so it also covers the plain `realfft` `f64` path when it's off.
     #[test]
     fn f64_core_resamples_a_sine_correctly() {
         let config = Config::new(44_100, 48_000, 1);
+        assert_f64_core_resamples_a_sine_correctly(config);
+    }
+
+    #[cfg(feature = "dd_fft")]
+    #[test]
+    fn dd_fft_core_resamples_a_sine_correctly() {
+        let config = Config::new(44_100, 48_000, 1).with_dd_fft(true);
+        assert_f64_core_resamples_a_sine_correctly(config);
+    }
+
+    fn assert_f64_core_resamples_a_sine_correctly(config: Config) {
         let derived = config.derive_config::<f64>().unwrap();
         let mut core = ArdftsrcCore::<f64>::new(derived);
 
         let input_hz = 1_000.0;
         let input_rate = 44_100.0;
-        let input: Vec<f64> = (0..8192).map(|i| (2.0 * std::f64::consts::PI * input_hz * i as f64 / input_rate).sin()).collect();
+        let input: Vec<f64> = (0..8192)
+            .map(|i| (2.0 * std::f64::consts::PI * input_hz * i as f64 / input_rate).sin())
+            .collect();
 
         let output = core.process_all(&input).unwrap();
 
         assert!(!output.is_empty());
-        assert!(output.iter().all(|sample| sample.is_finite()), "output contains non-finite samples");
+        assert!(
+            output.iter().all(|sample| sample.is_finite()),
+            "output contains non-finite samples"
+        );
 
         // A steady-state 1kHz sine resampled 44.1k -> 48k should still look like a bounded
         // sine, not silence or a blown-up/garbage signal: check the back half (past startup
         // transients) stays within a sane amplitude envelope around the original's.
         let steady_state = &output[output.len() / 2..];
-        let peak = steady_state.iter().cloned().fold(0.0f64, |acc, sample| acc.max(sample.abs()));
-        assert!(peak > 0.5 && peak < 1.5, "unexpected steady-state peak amplitude: {peak}");
+        let peak = steady_state
+            .iter()
+            .cloned()
+            .fold(0.0f64, |acc, sample| acc.max(sample.abs()));
+        assert!(
+            peak > 0.5 && peak < 1.5,
+            "unexpected steady-state peak amplitude: {peak}"
+        );
     }
 }

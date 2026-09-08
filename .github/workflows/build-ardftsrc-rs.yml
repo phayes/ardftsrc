@@ -32,10 +32,10 @@ jobs:
         run: |
           case "${{ runner.arch }}" in
             X64)
-              echo "features=rayon,avx" >> "$GITHUB_OUTPUT"
-              ;;
+            echo "features=rayon,avx,dd_fft" >> "$GITHUB_OUTPUT"
+            ;;
             ARM64)
-              echo "features=rayon,neon" >> "$GITHUB_OUTPUT"
+              echo "features=rayon,neon,dd_fft" >> "$GITHUB_OUTPUT"
               ;;
             *)
               echo "Unsupported architecture: ${{ runner.arch }}"

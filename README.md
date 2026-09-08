@@ -238,6 +238,7 @@ It's a speed/memory optimization, not a way to reduce buffering or latency — f
 | `neon`         | FFT NEON SIMD for ARM / Mac                                                       | Yes     |
 | `wasm_simd`    | FFT WebAssembly SIMD                                                              | Yes     |
 | `audioadapter` | Experimental [`audioadapter`](https://crates.io/crates/audioadapter) support      | No      |
+| `dd_fft`       | Double-double 🇨🇦☕ precision FFT for extreme quality                               | No      |
 
 Runtime feature detection is in place for all SIMD except webassembly. 
 
@@ -251,6 +252,8 @@ You can use this as a utility, or use it to benchmark this project.
 RUSTFLAGS="-C target-cpu=native" cargo build --release
 ./target/release/ardftsrc-rs --help
 ./target/release/ardftsrc-rs --input in.wav --output out.flac --output-rate 48000 --preset high
+./target/release/ardftsrc-rs --input in.wav --output out.flac --output-rate 48000 --preset extreme \
+    --taper-type beta_cdf --alpha 10 --beta 10 --dd-fft --decimate --phase -0.5
 ```
 
 ## Contributing

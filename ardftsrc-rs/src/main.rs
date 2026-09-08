@@ -27,11 +27,11 @@ const FLAC_WRITE_CHUNK_FRAMES: usize = 32768;
 enum PresetArg {
     /// Fastest preset; lowest quality (quality = 512, bandwidth = 0.8323).
     Fast,
-    /// Balanced quality/speed preset (quality = 2048, bandwidth = 0.95).
+    /// Balanced quality/speed preset (quality = 1878, bandwidth = 0.911).
     Good,
-    /// High quality preset for offline or quality-sensitive use (quality = 65536, bandwidth = 0.97).
+    /// High quality preset for offline or quality-sensitive use (quality = 73622, bandwidth = 0.987).
     High,
-    /// Maximum quality preset; slowest (quality = 524288, bandwidth = 0.9932).
+    /// Maximum quality preset; slowest (quality = 524514, bandwidth = 0.995).
     Extreme,
 }
 
@@ -47,6 +47,42 @@ enum TaperTypeArg {
     /// Beta-CDF taper transition.
     #[value(name = "beta_cdf", alias = "beta-cdf")]
     BetaCdf,
+}
+
+impl TaperTypeArg {
+    fn cli_name(self) -> &'static str {
+        match self {
+            Self::Planck => "planck",
+            #[cfg(feature = "bessel")]
+            Self::Bessel => "bessel",
+            Self::Cosine => "cosine",
+            Self::BetaCdf => "beta_cdf",
+        }
+    }
+
+    fn accepts_alpha(self) -> bool {
+        match self {
+            Self::Cosine | Self::BetaCdf => true,
+            Self::Planck => false,
+            #[cfg(feature = "bessel")]
+            Self::Bessel => true,
+        }
+    }
+
+    fn compatible_alpha_types() -> &'static str {
+        #[cfg(feature = "bessel")]
+        {
+            "cosine, beta_cdf, bessel"
+        }
+        #[cfg(not(feature = "bessel"))]
+        {
+            "cosine, beta_cdf"
+        }
+    }
+
+    fn compatible_beta_types() -> &'static str {
+        "beta_cdf"
+    }
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -99,19 +135,37 @@ struct Args {
     #[arg(long)]
     bandwidth: Option<f32>,
 
-    /// Taper alpha. Used by --taper-type cosine and beta_cdf, and by bessel when enabled.
+    /// Taper alpha. Requires a compatible --taper-type (cosine, beta_cdf, and bessel when enabled).
     ///
     /// For cosine, higher values are sharper cutoff; lower values are smoother.
+    /// Defaults: cosine 3.4375, beta_cdf 10.0, bessel 6.0.
     #[arg(long)]
     alpha: Option<f32>,
 
-    /// Beta-CDF taper beta. Used by --taper-type beta_cdf.
+    /// Beta-CDF taper beta. Used by --taper-type beta_cdf. Default is 10.0.
     #[arg(long)]
     beta: Option<f32>,
 
     /// Transition taper profile.
     #[arg(long = "taper-type", value_enum)]
     taper_type: Option<TaperTypeArg>,
+
+    /// Frequency-dependent phase rotation in [-1.0, 1.0]. Negative values can reduce pre-ringing.
+    #[arg(long)]
+    phase: Option<f32>,
+
+    /// Phase rotation intensity in [0.0, 100.0]. Default is 50.0. Ignored when --phase is 0.
+    #[arg(long = "phase-intensity")]
+    phase_intensity: Option<f32>,
+
+    /// Enable 2:1 pre-decimation for large downsampling ratios (4:1 or higher).
+    #[arg(long)]
+    decimate: bool,
+
+    /// Use the double-double-precision FFT backend. Much slower; intended for extreme quality.
+    #[cfg(feature = "dd_fft")]
+    #[arg(long = "dd-fft", alias = "dd_fft")]
+    dd_fft: bool,
 
     /// Output sample format. For .flac output, float formats are rejected.
     #[arg(long = "out-format", value_enum, default_value_t = OutFormatArg::Same)]
@@ -316,18 +370,45 @@ fn validate_args(args: &Args) -> Result<(), Box<dyn Error>> {
     if unique_outputs.len() != args.output.len() {
         return Err("--output must not contain duplicate paths".into());
     }
-    if matches!(args.taper_type, Some(TaperTypeArg::Planck)) && (args.alpha.is_some() || args.beta.is_some()) {
-        return Err("--alpha/--beta cannot be used with --taper-type=planck".into());
+    if args.alpha.is_some() {
+        match args.taper_type {
+            Some(taper) if taper.accepts_alpha() => {}
+            Some(taper) => {
+                return Err(format!(
+                    "--alpha is not compatible with --taper-type={} (compatible: {})",
+                    taper.cli_name(),
+                    TaperTypeArg::compatible_alpha_types()
+                )
+                .into());
+            }
+            None => {
+                return Err(format!(
+                    "--alpha requires a compatible --taper-type (compatible: {})",
+                    TaperTypeArg::compatible_alpha_types()
+                )
+                .into());
+            }
+        }
     }
-    #[cfg(feature = "bessel")]
-    if matches!(args.taper_type, Some(TaperTypeArg::Bessel)) && args.beta.is_some() {
-        return Err("--beta cannot be used with --taper-type=bessel".into());
-    }
-    if matches!(args.taper_type, Some(TaperTypeArg::Cosine)) && args.beta.is_some() {
-        return Err("--beta cannot be used with --taper-type=cosine".into());
-    }
-    if args.taper_type.is_none() && args.beta.is_some() {
-        return Err("--beta requires --taper-type=beta_cdf".into());
+    if args.beta.is_some() {
+        match args.taper_type {
+            Some(TaperTypeArg::BetaCdf) => {}
+            Some(taper) => {
+                return Err(format!(
+                    "--beta is not compatible with --taper-type={} (compatible: {})",
+                    taper.cli_name(),
+                    TaperTypeArg::compatible_beta_types()
+                )
+                .into());
+            }
+            None => {
+                return Err(format!(
+                    "--beta requires a compatible --taper-type (compatible: {})",
+                    TaperTypeArg::compatible_beta_types()
+                )
+                .into());
+            }
+        }
     }
     Ok(())
 }
@@ -374,6 +455,19 @@ fn build_config(args: &Args, input_sample_rate: usize, channels: usize) -> Resul
     if let Some(bandwidth) = args.bandwidth {
         config.bandwidth = bandwidth;
     }
+    if let Some(phase) = args.phase {
+        config.phase = phase;
+    }
+    if let Some(phase_intensity) = args.phase_intensity {
+        config.phase_intensity = phase_intensity;
+    }
+    if args.decimate {
+        config.decimate = true;
+    }
+    #[cfg(feature = "dd_fft")]
+    if args.dd_fft {
+        config.dd_fft = true;
+    }
 
     if let Some(taper_type) = args.taper_type {
         config.taper_type = match taper_type {
@@ -393,8 +487,6 @@ fn build_config(args: &Args, input_sample_rate: usize, channels: usize) -> Resul
                 TaperType::BetaCdf { alpha, beta }
             }
         };
-    } else if let Some(alpha) = args.alpha {
-        config.taper_type = TaperType::Cosine(alpha);
     }
 
     config.validate()?;
